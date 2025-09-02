@@ -1,0 +1,714 @@
+import os
+import numpy as np
+import pandas as pd
+import librosa
+import tensorflow as tf
+from tensorflow.keras import layers, models, Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+from skfuzzy import cmeans
+import skfuzzy as fuzz
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+DATASET_PATH = r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\tess"  # or savee, ravdess, tess, etc.
+
+STANDARD_EMOTIONS = [
+    'angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprised', 'calm', 'ps'
+]
+
+EMOTION_MAPPINGS = {
+    'savee': {
+        'a': 'angry', 'd': 'disgust', 'f': 'fear', 'h': 'happy',
+        'n': 'neutral', 'sa': 'sad', 'su': 'surprised'
+    },
+    'ravdess': {
+        '01': 'neutral', '02': 'calm', '03': 'happy', '04': 'sad',
+        '05': 'angry', '06': 'fear', '07': 'disgust', '08': 'surprised'
+    },
+    'tess': {
+        'angry': 'angry', 'disgust': 'disgust', 'fear': 'fear', 'happy': 'happy',
+        'neutral': 'neutral', 'ps': 'ps', 'sad': 'sad', 'surprised': 'surprised'
+    },
+    'cremad': {
+        'ANG': 'angry',
+        'DIS': 'disgust',
+        'FEA': 'fear',
+        'HAP': 'happy',
+        'NEU': 'neutral',
+        'SAD': 'sad'
+    }
+}
+
+import re
+
+def detect_dataset_type(dataset_path):
+    path = dataset_path.lower()
+    for key in EMOTION_MAPPINGS:
+        if key in path:
+            return key
+    raise ValueError("Unknown dataset type in path: " + dataset_path)
+
+def parse_emotion_from_filename(filename, dataset_type):
+    dataset_type = dataset_type.lower()
+    if dataset_type == 'savee':
+        match = re.search(r'_([a-z]+)', filename)
+        if match:
+            code = match.group(1)
+            return EMOTION_MAPPINGS['savee'].get(code)
+    elif dataset_type == 'ravdess':
+        parts = filename.split('-')
+        if len(parts) > 2:
+            code = parts[2]
+            return EMOTION_MAPPINGS['ravdess'].get(code)
+    elif dataset_type == 'tess':
+    # Example: OAF_bite_neutral.wav
+        parts = filename.replace('.wav', '').split('_')
+        if len(parts) >= 2:
+            code = parts[-1].lower()
+            return EMOTION_MAPPINGS['tess'].get(code)
+    elif dataset_type == 'cremad':
+        parts = filename.split('_')
+        if len(parts) >= 3:
+            code = parts[2].upper()
+            return EMOTION_MAPPINGS['cremad'].get(code)
+    return None
+
+def load_dataset(dataset_path):
+    dataset_type = detect_dataset_type(dataset_path)
+    file_paths = []
+    emotions = []
+    for root, dirs, files in os.walk(dataset_path):
+        for file in files:
+            if file.lower().endswith('.wav'):
+                emotion = parse_emotion_from_filename(file, dataset_type)
+                if emotion in STANDARD_EMOTIONS:
+                    file_paths.append(os.path.join(root, file))
+                    emotions.append(emotion)
+    return file_paths, emotions
+
+class AudioFeatureExtractor:
+    """Automatic feature extraction from audio files"""
+    def __init__(self, sr=22050, n_mfcc=13, n_fft=2048, hop_length=512, max_length=128):
+        self.sr = sr
+        self.n_mfcc = n_mfcc
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.max_length = max_length
+
+    def extract_features(self, audio_path):
+        """Extract multiple audio features automatically"""
+        try:
+            # Load audio file
+            y, sr = librosa.load(audio_path, sr=self.sr)
+
+            # Pad or truncate to fixed length
+            target_length = self.max_length * self.hop_length
+            if len(y) > target_length:
+                y = y[:target_length]
+            else:
+                y = np.pad(y, (0, target_length - len(y)), mode='constant')
+
+            # Extract features with fixed dimensions
+            features = {}
+
+            # MFCC features (time_steps, n_mfcc)
+            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=self.n_mfcc,
+                                      n_fft=self.n_fft, hop_length=self.hop_length)
+
+            # Ensure fixed time dimension
+            if mfcc.shape[1] > self.max_length:
+                mfcc = mfcc[:, :self.max_length]
+            elif mfcc.shape[1] < self.max_length:
+                mfcc = np.pad(mfcc, ((0, 0), (0, self.max_length - mfcc.shape[1])), mode='constant')
+
+            features['mfcc'] = mfcc.T  # Shape: (128, 13)
+
+            # Mel-spectrogram with fixed dimensions
+            mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=self.n_fft,
+                                                    hop_length=self.hop_length, n_mels=80)
+            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+            if mel_spec_db.shape[1] > self.max_length:
+                mel_spec_db = mel_spec_db[:, :self.max_length]
+            elif mel_spec_db.shape[1] < self.max_length:
+                mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, self.max_length - mel_spec_db.shape[1])), mode='constant')
+
+            features['mel_spec'] = mel_spec_db.T  # Shape: (128, 80)
+
+            # Chroma features
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=self.n_fft,
+                                               hop_length=self.hop_length)
+            if chroma.shape[1] > self.max_length:
+                chroma = chroma[:, :self.max_length]
+            elif chroma.shape[1] < self.max_length:
+                chroma = np.pad(chroma, ((0, 0), (0, self.max_length - chroma.shape[1])), mode='constant')
+
+            features['chroma'] = chroma.T  # Shape: (128, 12)
+
+            return features
+
+        except Exception as e:
+            print(f"Error processing {audio_path}: {str(e)}")
+            return None
+
+class AttentionLayer(layers.Layer):
+    """Custom attention mechanism"""
+    def __init__(self, attention_dim=128, **kwargs):
+        super(AttentionLayer, self).__init__(**kwargs)
+        self.attention_dim = attention_dim
+
+    def build(self, input_shape):
+        self.W = self.add_weight(name='attention_weight',
+                               shape=(input_shape[-1], self.attention_dim),
+                               initializer='glorot_uniform',
+                               trainable=True)
+        self.b = self.add_weight(name='attention_bias',
+                               shape=(self.attention_dim,),
+                               initializer='zeros',
+                               trainable=True)
+        self.u = self.add_weight(name='attention_u',
+                               shape=(self.attention_dim,),
+                               initializer='glorot_uniform',
+                               trainable=True)
+        super(AttentionLayer, self).build(input_shape)
+
+    def call(self, x):
+        # x shape: (batch_size, time_steps, features)
+        uit = tf.nn.tanh(tf.tensordot(x, self.W, axes=1) + self.b)
+        ait = tf.tensordot(uit, self.u, axes=1)
+        ait = tf.nn.softmax(ait, axis=1)
+
+        # Expand dimensions for broadcasting
+        ait = tf.expand_dims(ait, -1)
+        weighted_input = x * ait
+        output = tf.reduce_sum(weighted_input, axis=1)
+
+        return output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'attention_dim': self.attention_dim})
+        return config
+
+class SpeechEmotionRecognitionModel:
+    """Ensemble model combining CNN, GRU, and BiLSTM with attention"""
+    def __init__(self, num_classes=7):
+        self.num_classes = num_classes
+        self.model = None
+
+    def build_cnn_branch(self, input_shape, name):
+        """Build CNN branch for processing spectral features"""
+        input_layer = layers.Input(shape=input_shape, name=f'{name}_input')
+
+        # Reshape for 2D convolution (time, features, channels)
+        x = layers.Reshape((*input_shape, 1))(input_layer)
+
+        # First CNN channel - smaller filters
+        conv1_1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
+        conv1_2 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv1_1)
+
+        # Adaptive pooling based on input size
+        if input_shape[0] >= 4 and input_shape[1] >= 4:
+            pool1 = layers.MaxPooling2D((2, 2))(conv1_2)
+        else:
+            pool1 = conv1_2
+
+        # Second CNN channel - larger filters
+        conv2_1 = layers.Conv2D(64, (5, 5), activation='relu', padding='same')(x)
+        conv2_2 = layers.Conv2D(64, (5, 5), activation='relu', padding='same')(conv2_1)
+
+        if input_shape[0] >= 4 and input_shape[1] >= 4:
+            pool2 = layers.MaxPooling2D((2, 2))(conv2_2)
+        else:
+            pool2 = conv2_2
+
+        # Concatenate channels
+        merged = layers.Concatenate()([pool1, pool2])
+
+        # Global average pooling instead of multiple pooling layers
+        gap = layers.GlobalAveragePooling2D()(merged)
+
+        # Dense layers
+        dense = layers.Dense(256, activation='relu')(gap)
+        dropout = layers.Dropout(0.5)(dense)
+
+        return input_layer, dropout
+
+    def build_rnn_branch(self, input_shape, name):
+        """Build RNN branch with GRU and BiLSTM"""
+        input_layer = layers.Input(shape=input_shape, name=f'{name}_input')
+
+        # GRU with attention
+        gru_out = layers.GRU(128, return_sequences=True, dropout=0.3, recurrent_dropout=0.3)(input_layer)
+        gru_attention = AttentionLayer(128)(gru_out)
+
+        # BiLSTM with attention
+        bilstm_out = layers.Bidirectional(
+            layers.LSTM(64, return_sequences=True, dropout=0.3, recurrent_dropout=0.3)
+        )(input_layer)
+        bilstm_attention = AttentionLayer(128)(bilstm_out)
+
+        # Combine GRU and BiLSTM outputs
+        combined = layers.Concatenate()([gru_attention, bilstm_attention])
+        dense = layers.Dense(256, activation='relu')(combined)
+        dropout = layers.Dropout(0.5)(dense)
+
+        return input_layer, dropout
+
+    def build_model(self, feature_shapes):
+        """Build the complete ensemble model"""
+        inputs = []
+        branches = []
+
+        # Build branches based on available features
+        for feature_name, shape in feature_shapes.items():
+            if feature_name in ['mel_spec', 'chroma']:
+                # Use CNN for spectral features
+                input_layer, output = self.build_cnn_branch(shape, feature_name)
+                inputs.append(input_layer)
+                branches.append(output)
+            elif feature_name == 'mfcc':
+                # Use RNN for sequential features
+                input_layer, output = self.build_rnn_branch(shape, feature_name)
+                inputs.append(input_layer)
+                branches.append(output)
+
+        if not branches:
+            raise ValueError("No valid features provided")
+
+        # Ensemble fusion
+        if len(branches) > 1:
+            merged = layers.Concatenate()(branches)
+        else:
+            merged = branches[0]
+
+        # Final classification layers
+        dense1 = layers.Dense(512, activation='relu')(merged)
+        dropout1 = layers.Dropout(0.5)(dense1)
+
+        dense2 = layers.Dense(256, activation='relu')(dropout1)
+        dropout2 = layers.Dropout(0.3)(dense2)
+
+        dense3 = layers.Dense(128, activation='relu')(dropout2)
+        dropout3 = layers.Dropout(0.2)(dense3)
+
+        # Output layer
+        output = layers.Dense(self.num_classes, activation='softmax', name='emotion_output')(dropout3)
+
+        # Create model
+        self.model = Model(inputs=inputs, outputs=output)
+        return self.model
+
+    def compile_model(self, learning_rate=0.001):
+        """Compile the model"""
+        self.model.compile(
+            optimizer=Adam(learning_rate=learning_rate),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
+    def train_model(self, X_train, y_train, X_val, y_val, epochs=20, batch_size=16):
+        """Train the model"""
+        callbacks = [
+            EarlyStopping(patience=10, restore_best_weights=True, monitor='val_loss'),
+            ReduceLROnPlateau(factor=0.5, patience=5, min_lr=1e-7, monitor='val_loss')
+        ]
+
+        history = self.model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1
+        )
+
+        return history
+
+class FuzzyEmotionAnalyzer:
+    """Fuzzy C-Means analyzer for emotion conflicts"""
+    def __init__(self, emotion_names):
+        self.emotion_names = emotion_names
+
+    def analyze_emotion_conflicts(self, predictions_proba, y_true, n_clusters=3, m=2):
+        """
+        Analyze emotion conflicts using Fuzzy C-Means clustering
+
+        Args:
+            predictions_proba: Prediction probabilities from the model
+            y_true: True emotion labels
+            n_clusters: Number of clusters for FCM
+            m: Fuzziness parameter
+        """
+        print("\n🔍 Analyzing Emotion Conflicts using Fuzzy C-Means...")
+        print("=" * 60)
+
+        # Prepare data for FCM - transpose for sklearn format
+        data = predictions_proba.T
+
+        # Apply Fuzzy C-Means clustering
+        cntr, u, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
+            data, n_clusters, m, error=0.005, maxiter=1000, init=None
+        )
+
+        # Get cluster membership for each sample
+        cluster_membership = np.argmax(u, axis=0)
+
+        # Calculate conflict scores for each emotion
+        conflict_results = []
+
+        for i, (true_emotion, pred_proba) in enumerate(zip(y_true, predictions_proba)):
+            primary_emotion = np.argmax(pred_proba)
+            primary_confidence = pred_proba[primary_emotion]
+
+            # Sort probabilities to find secondary emotions
+            sorted_indices = np.argsort(pred_proba)[::-1]
+            secondary_emotion = sorted_indices[1] if len(sorted_indices) > 1 else primary_emotion
+            secondary_confidence = pred_proba[secondary_emotion]
+
+            # Calculate conflict score (uncertainty measure)
+            conflict_score = 1 - primary_confidence
+
+            # Determine if there's a significant conflict
+            conflict_threshold = 0.3  # Adjustable threshold
+            has_conflict = (secondary_confidence > conflict_threshold) or (conflict_score > 0.5)
+
+            # Get fuzzy membership values
+            fuzzy_memberships = u[:, i]
+            dominant_cluster = cluster_membership[i]
+
+            conflict_info = {
+                'sample_id': i,
+                'true_emotion': self.emotion_names[true_emotion],
+                'predicted_emotion': self.emotion_names[primary_emotion],
+                'primary_confidence': primary_confidence,
+                'secondary_emotion': self.emotion_names[secondary_emotion],
+                'secondary_confidence': secondary_confidence,
+                'conflict_score': conflict_score,
+                'has_conflict': has_conflict,
+                'fuzzy_cluster': dominant_cluster,
+                'fuzzy_memberships': fuzzy_memberships,
+                'prediction_probabilities': pred_proba
+            }
+
+            conflict_results.append(conflict_info)
+
+        # Analyze conflicts by emotion class
+        self._analyze_conflicts_by_emotion(conflict_results)
+
+        # Visualize fuzzy clustering results
+        self._visualize_fuzzy_clusters(u, cluster_membership, predictions_proba, y_true)
+
+        return conflict_results, cntr, u
+
+    def _analyze_conflicts_by_emotion(self, conflict_results):
+        """Analyze conflicts grouped by primary emotion"""
+        print("\n📊 Conflict Analysis by Primary Emotion:")
+        print("-" * 50)
+
+        # Group by predicted emotion
+        emotion_conflicts = {name: [] for name in self.emotion_names}
+
+        for result in conflict_results:
+            if result['has_conflict']:
+                emotion_conflicts[result['predicted_emotion']].append(result)
+
+        # Display conflicts for each emotion
+        for emotion, conflicts in emotion_conflicts.items():
+            if conflicts:
+                print(f"\n🎭 {emotion.upper()} - Found {len(conflicts)} conflicting samples:")
+
+                for conflict in conflicts[:5]:  # Show top 5 conflicts
+                    print(f"  Sample {conflict['sample_id']}:")
+                    print(f"    Primary: {conflict['predicted_emotion']} ({conflict['primary_confidence']:.3f})")
+                    print(f"    Secondary: {conflict['secondary_emotion']} ({conflict['secondary_confidence']:.3f})")
+                    print(f"    True: {conflict['true_emotion']}")
+                    print(f"    Conflict Score: {conflict['conflict_score']:.3f}")
+                    print(f"    Fuzzy Cluster: {conflict['fuzzy_cluster']}")
+                    print()
+
+                if len(conflicts) > 5:
+                    print(f"    ... and {len(conflicts) - 5} more conflicts\n")
+            else:
+                print(f"\n✅ {emotion.upper()} - No significant conflicts detected")
+
+    def _visualize_fuzzy_clusters(self, u, cluster_membership, predictions_proba, y_true):
+        """Visualize fuzzy clustering results"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # Plot 1: Fuzzy membership values
+        im1 = axes[0, 0].imshow(u, aspect='auto', cmap='viridis')
+        axes[0, 0].set_title('Fuzzy Membership Matrix')
+        axes[0, 0].set_xlabel('Samples')
+        axes[0, 0].set_ylabel('Clusters')
+        plt.colorbar(im1, ax=axes[0, 0])
+
+        # Plot 2: Cluster assignments vs true emotions
+        scatter = axes[0, 1].scatter(y_true, cluster_membership,
+                                   c=cluster_membership, cmap='tab10', alpha=0.6)
+        axes[0, 1].set_title('Fuzzy Clusters vs True Emotions')
+        axes[0, 1].set_xlabel('True Emotion Labels')
+        axes[0, 1].set_ylabel('Fuzzy Cluster Assignment')
+        axes[0, 1].set_xticks(range(len(self.emotion_names)))
+        axes[0, 1].set_xticklabels(self.emotion_names, rotation=45)
+
+        # Plot 3: Prediction confidence distribution
+        max_confidences = np.max(predictions_proba, axis=1)
+        axes[1, 0].hist(max_confidences, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+        axes[1, 0].set_title('Distribution of Maximum Prediction Confidence')
+        axes[1, 0].set_xlabel('Confidence Score')
+        axes[1, 0].set_ylabel('Frequency')
+        axes[1, 0].axvline(x=0.7, color='red', linestyle='--', label='High Confidence Threshold')
+        axes[1, 0].legend()
+
+        # Plot 4: Conflict heatmap
+        conflict_matrix = np.zeros((len(self.emotion_names), len(self.emotion_names)))
+
+        for i, (true_label, pred_proba) in enumerate(zip(y_true, predictions_proba)):
+            primary_pred = np.argmax(pred_proba)
+            secondary_pred = np.argsort(pred_proba)[-2]
+
+            if pred_proba[secondary_pred] > 0.2:  # Significant secondary prediction
+                conflict_matrix[primary_pred, secondary_pred] += 1
+
+        sns.heatmap(conflict_matrix, annot=True, fmt='.0f', cmap='Reds',
+                   xticklabels=self.emotion_names, yticklabels=self.emotion_names,
+                   ax=axes[1, 1])
+        axes[1, 1].set_title('Emotion Conflict Heatmap')
+        axes[1, 1].set_xlabel('Secondary Emotion (Conflict)')
+        axes[1, 1].set_ylabel('Primary Emotion (Main Prediction)')
+
+        plt.tight_layout()
+        plt.show()
+
+def prepare_data(file_paths, emotions, feature_extractor, le):
+    """Prepare data for training"""
+    features_list = []
+    labels = []
+
+    print("Extracting features from audio files...")
+    for i, (file_path, emotion) in enumerate(zip(file_paths, emotions)):
+        if i % 50 == 0:
+            print(f"Processing {i+1}/{len(file_paths)} files...")
+
+        features = feature_extractor.extract_features(file_path)
+        if features is not None and all(f is not None for f in features.values()):
+            features_list.append(features)
+            labels.append(emotion)
+
+    if not features_list:
+        raise ValueError("No valid features extracted from audio files")
+
+    # Convert to structured format
+    feature_arrays = {}
+    feature_names = list(features_list[0].keys())
+
+    for name in feature_names:
+        feature_arrays[name] = np.array([f[name] for f in features_list])
+
+    # Encode labels to integers using the provided LabelEncoder
+    labels = le.transform(labels)
+
+    return feature_arrays, np.array(labels)
+
+def plot_results(history, y_true, y_pred, emotion_names):
+    """Plot training results and confusion matrix"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+    # Training history
+    axes[0, 0].plot(history.history['accuracy'], label='Training Accuracy')
+    axes[0, 0].plot(history.history['val_accuracy'], label='Validation Accuracy')
+    axes[0, 0].set_title('Model Accuracy')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Accuracy')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
+
+    axes[0, 1].plot(history.history['loss'], label='Training Loss')
+    axes[0, 1].plot(history.history['val_loss'], label='Validation Loss')
+    axes[0, 1].set_title('Model Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('Loss')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+
+    # Only use present classes for confusion matrix and report
+    present_labels = sorted(set(y_true) | set(y_pred))
+    present_names = [emotion_names[i] for i in present_labels]
+
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=present_labels)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+               xticklabels=present_names, yticklabels=present_names, ax=axes[1, 0])
+    axes[1, 0].set_title('Confusion Matrix')
+    axes[1, 0].set_xlabel('Predicted')
+    axes[1, 0].set_ylabel('Actual')
+
+    # Classification report (as text)
+    report = classification_report(y_true, y_pred, labels=present_labels, target_names=present_names)
+    axes[1, 1].text(0.1, 0.1, report, fontsize=10, family='monospace',
+                   verticalalignment='bottom')
+    axes[1, 1].set_title('Classification Report')
+    axes[1, 1].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    """Main training pipeline with Fuzzy C-Means analysis"""
+    print("Speech Emotion Recognition with Fuzzy Conflict Analysis - Universal Dataset")
+    print("=" * 80)
+
+    # Check dataset path
+    if not os.path.exists(DATASET_PATH):
+        print(f"❌ Dataset path does not exist: {DATASET_PATH}")
+        print("Please update DATASET_PATH with the correct dataset path.")
+        return
+
+    # Detect dataset type
+    dataset_type = detect_dataset_type(DATASET_PATH)
+    print(f"Detected dataset type: {dataset_type}")
+
+    # Initialize components
+    print("🔧 Initializing components...")
+    feature_extractor = AudioFeatureExtractor()
+
+    # Load dataset
+    print("📁 Loading dataset...")
+    file_paths, emotions = load_dataset(DATASET_PATH)
+    print(f"Found {len(file_paths)} audio files")
+
+    if len(file_paths) == 0:
+        print("❌ No audio files found! Check your dataset structure.")
+        return
+
+    # Label encoding (uniform across datasets)
+    le = LabelEncoder()
+    le.fit(STANDARD_EMOTIONS)
+    emotion_names = list(le.classes_)
+
+    # Show emotion distribution
+    emotion_counts = pd.Series(emotions).value_counts()
+    print("📊 Emotion distribution:")
+    for name in emotion_names:
+        count = emotion_counts.get(name, 0)
+        if count > 0:
+            print(f"  {name}: {count} samples")
+
+    # Extract features
+    print("🎵 Extracting audio features...")
+    features_dict, labels = prepare_data(file_paths, emotions, feature_extractor, le)
+    print("✅ Feature extraction completed!")
+    print("Feature shapes:")
+    for name, features in features_dict.items():
+        print(f"  {name}: {features.shape}")
+
+    # Prepare data splits
+    print("🔄 Splitting dataset...")
+    feature_names = ['mfcc', 'mel_spec', 'chroma']
+    X = [features_dict[name] for name in feature_names if name in features_dict]
+    feature_shapes = {name: features_dict[name].shape[1:] for name in feature_names if name in features_dict}
+
+    indices = np.arange(len(labels))
+    train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42, stratify=labels)
+    train_idx, val_idx = train_test_split(train_idx, test_size=0.2, random_state=42, stratify=labels[train_idx])
+
+    X_train = [features[train_idx] for features in X]
+    X_val = [features[val_idx] for features in X]
+    X_test = [features[test_idx] for features in X]
+    y_train = labels[train_idx]
+    y_val = labels[val_idx]
+    y_test = labels[test_idx]
+
+    print(f"Training samples: {len(y_train)}")
+    print(f"Validation samples: {len(y_val)}")
+    print(f"Test samples: {len(y_test)}")
+
+    # Build model
+    print("🏗️ Building ensemble model...")
+    model = SpeechEmotionRecognitionModel(num_classes=len(STANDARD_EMOTIONS))
+    model.build_model(feature_shapes)
+    model.compile_model(learning_rate=0.001)
+
+    print("📋 Model Summary:")
+    model.model.summary()
+
+    # Train model
+    print("🚀 Training model...")
+    history = model.train_model(X_train, y_train, X_val, y_val, epochs=20, batch_size=16)
+
+    # Evaluate model
+    print("📊 Evaluating model...")
+    test_loss, test_accuracy = model.model.evaluate(X_test, y_test, verbose=0)
+    print(f"✅ Test Accuracy: {test_accuracy:.4f}")
+    print(f"   Test Loss: {test_loss:.4f}")
+
+    # Make predictions with probabilities
+    print("🔮 Making predictions...")
+    predictions_proba = model.model.predict(X_test, verbose=0)
+    y_pred = np.argmax(predictions_proba, axis=1)
+
+    # Only use present classes for report
+    present_labels = sorted(set(y_test) | set(y_pred))
+    present_names = [emotion_names[i] for i in present_labels]
+
+    # Generate detailed report
+    print("\n📋 Classification Report:")
+    print(classification_report(y_test, y_pred, labels=present_labels, target_names=present_names))
+
+    # Initialize Fuzzy Emotion Analyzer
+    fuzzy_analyzer = FuzzyEmotionAnalyzer(emotion_names)
+
+    # Analyze emotion conflicts using Fuzzy C-Means
+    conflict_results, cluster_centers, fuzzy_matrix = fuzzy_analyzer.analyze_emotion_conflicts(
+        predictions_proba, y_test, n_clusters=3, m=2
+    )
+
+    # Plot traditional results
+    print("📈 Generating plots...")
+    plot_results(history, y_test, y_pred, emotion_names)
+
+    # Additional conflict analysis summary
+    print("\n" + "="*80)
+    print("🎯 FUZZY CONFLICT ANALYSIS SUMMARY")
+    print("="*80)
+
+    total_conflicts = sum(1 for result in conflict_results if result['has_conflict'])
+    total_samples = len(conflict_results)
+    conflict_percentage = (total_conflicts / total_samples) * 100
+
+    print(f"Total samples analyzed: {total_samples}")
+    print(f"Samples with conflicts: {total_conflicts}")
+    print(f"Conflict rate: {conflict_percentage:.2f}%")
+
+    # Show most conflicted emotions
+    conflict_by_emotion = {}
+    for result in conflict_results:
+        if result['has_conflict']:
+            primary = result['predicted_emotion']
+            if primary not in conflict_by_emotion:
+                conflict_by_emotion[primary] = []
+            conflict_by_emotion[primary].append(result)
+
+    print("\n🔍 Most Conflicted Emotions:")
+    sorted_conflicts = sorted(conflict_by_emotion.items(),
+                            key=lambda x: len(x[1]), reverse=True)
+
+    for emotion, conflicts in sorted_conflicts:
+        avg_conflict_score = np.mean([c['conflict_score'] for c in conflicts])
+        print(f"  {emotion}: {len(conflicts)} conflicts (avg score: {avg_conflict_score:.3f})")
+
+    # Save model
+    model_path = f"{dataset_type}_emotion_recognition_model.h5"
+    model.model.save(model_path)
+    print(f"\n💾 Model saved: {model_path}")
+    print("🎉 Training and analysis completed successfully!")
+
+if __name__ == "__main__":
+    main()

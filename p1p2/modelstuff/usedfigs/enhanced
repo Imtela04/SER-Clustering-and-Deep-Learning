@@ -1,0 +1,24 @@
+from PIL import Image
+import matplotlib.pyplot as plt
+
+# Load the uploaded images
+image_paths = [
+    r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\usedfigs\cremad-tess.png",
+    r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\usedfigs\nuhashmodelfuzzycremad.png",
+    r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\usedfigs\nuhashmodel1cremad.png",
+    r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\usedfigs\nuhashmodelfuzzycremad.png",
+    r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\usedfigs\nuhashmodelfuzzycremadeval.png"
+]
+
+# Set up a larger figure for better visibility
+fig, axs = plt.subplots(len(image_paths), 1, figsize=(20, 25))
+
+# Display each image in a subplot
+for ax, path in zip(axs, image_paths):
+    img = Image.open(path)
+    ax.imshow(img)
+    ax.axis('off')  # Hide axes
+    ax.set_title(path.split("/")[-1], fontsize=16)
+
+plt.tight_layout()
+plt.show()
