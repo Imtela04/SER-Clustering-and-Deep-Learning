@@ -1,14 +1,19 @@
 # Ignore virtual environments
 venv*/
+.venv*/
+.venv311*/
 venv311*/
 datasets/.venv*/
 datasets/.venv311*/
+datasets/venv*/
+datasets/venv311*/
 
 # Ignore datasets (large files)
 datasets/cremad
 datasets/ravdess
 datasets/tess
 datasets/savee
+yes
 
 
 # Ignore Python cache files
