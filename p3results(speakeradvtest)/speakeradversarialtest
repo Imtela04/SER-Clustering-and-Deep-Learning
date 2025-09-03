@@ -44,8 +44,8 @@ class GradientReversalLayer(Layer):
         return reverse_grad(x)
 
 # Choose dataset
-DATASET_NAME = "ravdess"  # or "savee", "tess", "ravdess"
-DATASET_PATH = r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\ravdess"  # update as needed
+DATASET_NAME = "cremad"  # or "savee", "tess", "ravdess"
+DATASET_PATH = r"C:\Users\imtel\OneDrive\pc2\thesis\datasets\cremad"  # update as needed
 
 
 class AudioFeatureExtractor:
@@ -166,8 +166,8 @@ class SpeechEmotionRecognitionModel:
         x = layers.Reshape((*input_shape, 1))(input_layer)
 
         # First CNN channel - smaller filters
-        conv1_1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
-        conv1_2 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv1_1)
+        conv1_1 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        conv1_2 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(conv1_1)
 
         # Adaptive pooling based on input size
         if input_shape[0] >= 4 and input_shape[1] >= 4:
@@ -176,8 +176,8 @@ class SpeechEmotionRecognitionModel:
             pool1 = conv1_2
 
         # Second CNN channel - larger filters
-        conv2_1 = layers.Conv2D(64, (5, 5), activation='relu', padding='same')(x)
-        conv2_2 = layers.Conv2D(64, (5, 5), activation='relu', padding='same')(conv2_1)
+        conv2_1 = layers.Conv2D(128, (5, 5), activation='relu', padding='same')(x)
+        conv2_2 = layers.Conv2D(128, (5, 5), activation='relu', padding='same')(conv2_1)
 
         if input_shape[0] >= 4 and input_shape[1] >= 4:
             pool2 = layers.MaxPooling2D((2, 2))(conv2_2)
@@ -192,7 +192,7 @@ class SpeechEmotionRecognitionModel:
 
         # Dense layers
         dense = layers.Dense(256, activation='relu')(gap)
-        dropout = layers.Dropout(0.5)(dense)
+        dropout = layers.Dropout(0.3)(dense)
 
         return input_layer, dropout
 
@@ -201,19 +201,19 @@ class SpeechEmotionRecognitionModel:
         input_layer = layers.Input(shape=input_shape, name=f'{name}_input')
 
         # GRU with attention
-        gru_out = layers.GRU(128, return_sequences=True, dropout=0.3, recurrent_dropout=0.3)(input_layer)
+        gru_out = layers.GRU(256, return_sequences=True, dropout=0.2, recurrent_dropout=0.2)(input_layer)
         gru_attention = AttentionLayer(128)(gru_out)
 
         # BiLSTM with attention
         bilstm_out = layers.Bidirectional(
-            layers.LSTM(64, return_sequences=True, dropout=0.3, recurrent_dropout=0.3)
-        )(input_layer)
+            layers.LSTM(128, return_sequences=True, dropout=0.2, recurrent_dropout=0.2)
+        )(input_layer)  
         bilstm_attention = AttentionLayer(128)(bilstm_out)
 
         # Combine GRU and BiLSTM outputs
         combined = layers.Concatenate()([gru_attention, bilstm_attention])
         dense = layers.Dense(256, activation='relu')(combined)
-        dropout = layers.Dropout(0.5)(dense)
+        dropout = layers.Dropout(0.3)(dense)
 
         return input_layer, dropout
 
@@ -608,22 +608,22 @@ def plot_results(history, y_true, y_pred, emotion_names):
     """Plot training results and confusion matrix"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     #commented out as history is not returned in current training method(mixup)
-    # # Training history
-    # axes[0, 0].plot(history.history['emotion_output_accuracy'], label='Emotion Training Accuracy')
-    # axes[0, 0].plot(history.history['val_emotion_output_accuracy'], label='Emotion Validation Accuracy')
-    # axes[0, 0].set_title('Emotion Model Accuracy')
-    # axes[0, 0].set_xlabel('Epoch')
-    # axes[0, 0].set_ylabel('Accuracy')
-    # axes[0, 0].legend()
-    # axes[0, 0].grid(True)
+    # Training history
+    axes[0, 0].plot(history.history['emotion_output_accuracy'], label='Emotion Training Accuracy')
+    axes[0, 0].plot(history.history['val_emotion_output_accuracy'], label='Emotion Validation Accuracy')
+    axes[0, 0].set_title('Emotion Model Accuracy')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Accuracy')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
 
-    # axes[0, 1].plot(history.history['emotion_output_loss'], label='Emotion Training Loss')
-    # axes[0, 1].plot(history.history['val_emotion_output_loss'], label='Emotion Validation Loss')
-    # axes[0, 1].set_title('Emotion Model Loss')
-    # axes[0, 1].set_xlabel('Epoch')
-    # axes[0, 1].set_ylabel('Loss')
-    # axes[0, 1].legend()
-    # axes[0, 1].grid(True)
+    axes[0, 1].plot(history.history['emotion_output_loss'], label='Emotion Training Loss')
+    axes[0, 1].plot(history.history['val_emotion_output_loss'], label='Emotion Validation Loss')
+    axes[0, 1].set_title('Emotion Model Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('Loss')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
 
     # Confusion matrix
     cm = confusion_matrix(y_true, y_pred)
