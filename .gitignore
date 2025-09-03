@@ -7,13 +7,15 @@ datasets/.venv*/
 datasets/.venv311*/
 datasets/venv*/
 datasets/venv311*/
+p1p2/modelstuff.venv*/
+p1p2/modelstuff.venv311*/
 
 # Ignore datasets (large files)
 datasets/cremad
 datasets/ravdess
 datasets/tess
 datasets/savee
-yes
+
 
 
 # Ignore Python cache files
