@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore')
-
+#used grl by lowering adversarial effect and reduced loss weight
 # def mixup_data(X, y, alpha=0.2):
 #     '''Returns mixed inputs, pairs of targets, and lambda'''
 #     if alpha > 0:
